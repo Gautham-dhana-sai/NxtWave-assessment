@@ -1,5 +1,6 @@
 require('dotenv').config();
 const express = require('express');
+const morgan = require('morgan');
 const authRoutes = require('./routes/auth.routes');
 const userRoutes = require('./routes/user.routes');
 const taskRoutes = require('./routes/task.routes');
@@ -7,7 +8,13 @@ const errorHandler = require('./middleware/errorHandler');
 
 const app = express();
 
-app.use(express.json());
+// HTTP request logging — skip in test env
+if (process.env.NODE_ENV !== 'test') {
+  app.use(morgan('[:date[iso]] :method :url :status :res[content-length] - :response-time ms'));
+}
+
+// Body parsing with size guard (10kb is generous for this API's payloads)
+app.use(express.json({ limit: '10kb' }));
 
 app.get('/health', (req, res) => res.json({ status: 200, data: { message: 'API is running' } }));
 

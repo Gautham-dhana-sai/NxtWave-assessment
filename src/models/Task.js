@@ -56,10 +56,13 @@ const taskSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// Indexes on frequently queried fields
+// Compound indexes include organization so every query stays tenant-scoped.
+// { status, organization } — list/filter tasks by status within an org
+// { assignee, organization } — MEMBER self-scoped list + assignee filter
+// { due_date } sparse — analytics/overdue queries; sparse skips null-dated tasks
 taskSchema.index({ status: 1, organization: 1 });
 taskSchema.index({ assignee: 1, organization: 1 });
-taskSchema.index({ due_date: 1 });
+taskSchema.index({ due_date: 1 }, { sparse: true });
 
 const Task = mongoose.model('Task', taskSchema);
 module.exports = { Task, PRIORITIES, STATUSES, TRANSITIONS };

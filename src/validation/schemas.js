@@ -82,7 +82,8 @@ const task = {
     }),
     due_date: Joi.date().iso().greater('now').allow(null).default(null).messages({
       'date.greater': 'due_date must be a future date',
-      'date.iso': 'due_date must be a valid ISO date',
+      'date.base': 'due_date must be a valid ISO date',
+      'date.format': 'due_date must be a valid ISO date',
     }),
   }),
 
@@ -99,7 +100,8 @@ const task = {
     }),
     due_date: Joi.date().iso().greater('now').allow(null).messages({
       'date.greater': 'due_date must be a future date',
-      'date.iso': 'due_date must be a valid ISO date',
+      'date.base': 'due_date must be a valid ISO date',
+      'date.format': 'due_date must be a valid ISO date',
     }),
   }).min(1).messages({
     'object.min': 'At least one field must be provided to update',

@@ -1,6 +1,7 @@
 const { Task, TRANSITIONS } = require('../models/Task');
 const { User } = require('../models/User');
 const { sendError, sendSuccess } = require('../utils/response');
+const cache = require('../utils/cache');
 
 // Verify assignee belongs to the same org
 const resolveAssignee = async (assigneeId, org) => {
@@ -33,6 +34,9 @@ const createTask = async (req, res) => {
     { path: 'createdBy', select: 'name email' },
   ]);
 
+  // Invalidate org cache — new task affects list results for all roles
+  await cache.invalidate(assignee || null, req.user.organization);
+
   return sendSuccess(res, 201, { task });
 };
 
@@ -42,14 +46,29 @@ const listTasks = async (req, res) => {
   const filter = { organization: req.user.organization };
 
   // MEMBER can only see their own tasks
+  let cacheAssigneeId;
   if (req.user.role === 'MEMBER') {
     filter.assignee = req.user._id;
+    cacheAssigneeId = String(req.user._id);
   } else {
-    if (assignee) filter.assignee = assignee;
+    if (assignee) {
+      filter.assignee = assignee;
+      cacheAssigneeId = assignee;
+    } else {
+      // ADMIN/MANAGER listing all — key under a sentinel so it's still org-tracked
+      cacheAssigneeId = `org:${req.user.organization}`;
+    }
   }
 
   if (status) filter.status = status;
   if (priority) filter.priority = priority;
+
+  const cacheKey = cache.buildKey(cacheAssigneeId, { page, limit, status, priority });
+  const cached = await cache.get(cacheKey);
+  if (cached) {
+    res.set('X-Cache', 'HIT');
+    return sendSuccess(res, 200, cached);
+  }
 
   const skip = (page - 1) * limit;
   const [tasks, total] = await Promise.all([
@@ -62,15 +81,15 @@ const listTasks = async (req, res) => {
     Task.countDocuments(filter),
   ]);
 
-  return sendSuccess(res, 200, {
+  const payload = {
     tasks,
-    pagination: {
-      page,
-      limit,
-      total,
-      totalPages: Math.ceil(total / limit),
-    },
-  });
+    pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+  };
+
+  await cache.set(cacheKey, payload, req.user.organization);
+
+  res.set('X-Cache', 'MISS');
+  return sendSuccess(res, 200, payload);
 };
 
 const getTask = async (req, res) => {
@@ -92,11 +111,7 @@ const updateTask = async (req, res) => {
   const task = await Task.findOne({ _id: req.params.taskId, organization: req.user.organization });
   if (!task) return sendError(res, 404, 'NOT_FOUND', 'Task not found');
 
-  // MEMBER cannot update task fields (only status via PATCH /status)
-  if (req.user.role === 'MEMBER') {
-    return sendError(res, 403, 'FORBIDDEN', 'Members can only update task status');
-  }
-
+  const previousAssignee = task.assignee ? String(task.assignee) : null;
   const { assignee, ...rest } = req.body;
 
   if (assignee !== undefined) {
@@ -115,6 +130,13 @@ const updateTask = async (req, res) => {
   await task.populate([
     { path: 'assignee', select: 'name email role' },
     { path: 'createdBy', select: 'name email' },
+  ]);
+
+  // Invalidate both old and new assignee caches in case reassignment happened
+  const newAssignee = task.assignee ? String(task.assignee._id) : null;
+  await Promise.all([
+    cache.invalidate(previousAssignee, req.user.organization),
+    newAssignee !== previousAssignee ? cache.invalidate(newAssignee, req.user.organization) : Promise.resolve(),
   ]);
 
   return sendSuccess(res, 200, { task });
@@ -152,12 +174,17 @@ const updateTaskStatus = async (req, res) => {
     { path: 'createdBy', select: 'name email' },
   ]);
 
+  await cache.invalidate(task.assignee ? String(task.assignee._id) : null, req.user.organization);
+
   return sendSuccess(res, 200, { task });
 };
 
 const deleteTask = async (req, res) => {
   const task = await Task.findOneAndDelete({ _id: req.params.taskId, organization: req.user.organization });
   if (!task) return sendError(res, 404, 'NOT_FOUND', 'Task not found');
+
+  await cache.invalidate(task.assignee ? String(task.assignee) : null, req.user.organization);
+
   return sendSuccess(res, 200, { message: 'Task deleted successfully' });
 };
 
