@@ -2,185 +2,243 @@
 
 A REST API for managing tasks within a team. Users belong to an organization, have roles, and can create/manage tasks based on their permissions.
 
+**Stack:** Node.js · Express 5 · MongoDB (Mongoose) · Redis (ioredis) · JWT · Docker
+
 ---
 
 ## Setup
 
+Clone the repo and run one command — no other configuration is needed:
+
 ```bash
-# Clone and install
+docker compose up
+```
+
+The compose file includes default development secrets so reviewers can start immediately. MongoDB and Redis are health-checked before the API boots.
+
+API available at: `http://localhost:3000/health`
+
+```bash
+# Stop containers (data volumes are preserved)
+docker compose down
+
+# Stop and wipe all data
+docker compose down -v
+```
+
+> **Production:** Override the JWT secrets before deploying:
+> ```bash
+> JWT_ACCESS_SECRET=<strong-random> JWT_REFRESH_SECRET=<strong-random> docker compose up
+> ```
+
+**Local development (without Docker):**
+
+```bash
+cp .env.example .env   # edit MONGODB_URI, REDIS_URL, and JWT secrets
 npm install
-
-# Copy env file and fill in secrets
-cp .env.example .env
-
-# Start (requires MongoDB running locally)
 npm start
 ```
 
-> Docker support coming — `docker compose up` will be enough once containerized.
+---
+
+## Caching Strategy
+
+Redis caches responses for `GET /api/tasks` only. All other endpoints go directly to MongoDB. **TTL: 60 seconds** (configurable via `CACHE_TTL_SECONDS`).
+
+### Cache key format
+
+```
+tasks:assignee:<assigneeId>:<status>:<priority>:p<page>:l<limit>
+```
+
+| Role | assigneeId used in key |
+|---|---|
+| MEMBER | always `req.user._id` — they only see their own tasks |
+| ADMIN/MANAGER with `?assignee=` filter | the filter value |
+| ADMIN/MANAGER with no assignee filter | sentinel `org:<orgName>` |
+
+Every written key is also registered in a Redis Set `tasks:org:<org>:__keys__`. Invalidation reads this set with `SMEMBERS` then bulk-deletes in a pipeline — no `KEYS *` scan is ever used.
+
+### Invalidation triggers
+
+| Event | What is invalidated |
+|---|---|
+| Task created | Assignee's cached pages + entire org key set |
+| Task fields updated | Old assignee's keys + new assignee's keys + org key set |
+| Task status updated | Assignee's keys + org key set |
+| Task deleted | Assignee's keys + org key set |
+
+Cache failures are **silent** — a Redis outage degrades to uncached MongoDB reads, never a 500 error. Every list response includes an `X-Cache: HIT` or `X-Cache: MISS` header for observability.
 
 ---
 
-## Database Schema
+## Database Design
 
-### Collection: `users`
+### Collections
 
-| Field           | Type       | Required | Notes                              |
-|----------------|------------|----------|------------------------------------|
-| `_id`           | ObjectId   | auto     | Primary key                        |
-| `name`          | String     | yes      |                                    |
-| `email`         | String     | yes      | Unique, lowercase                  |
-| `password`      | String     | yes      | bcrypt hashed, never returned      |
-| `role`          | String     | yes      | `ADMIN` \| `MANAGER` \| `MEMBER`   |
-| `organization`  | String     | yes      | Tenant identifier                  |
-| `refreshTokens` | [String]   | no       | Active refresh tokens (rotation)   |
-| `createdAt`     | Date       | auto     |                                    |
-| `updatedAt`     | Date       | auto     |                                    |
+**`users`**
 
-**Indexes:**
-- `email` — unique (auto from schema)
-- `{ organization: 1 }` — org-scoped user lookups
+| Field | Type | Notes |
+|---|---|---|
+| `_id` | ObjectId | PK (auto) |
+| `name` | String | Required |
+| `email` | String | Unique · lowercase |
+| `password` | String | bcrypt-hashed · never returned |
+| `role` | Enum | `ADMIN` \| `MANAGER` \| `MEMBER` |
+| `organization` | String | Tenant identifier |
+| `refreshTokens` | [String] | Active tokens for rotation |
+| `createdAt / updatedAt` | Date | Auto |
 
----
-
-### Collection: `tasks`
-
-| Field          | Type      | Required | Notes                                     |
-|---------------|-----------|----------|-------------------------------------------|
-| `_id`          | ObjectId  | auto     | Primary key                               |
-| `title`        | String    | yes      |                                           |
-| `description`  | String    | no       | Defaults to `""`                          |
-| `priority`     | String    | yes      | `LOW` \| `MEDIUM` \| `HIGH`, default `MEDIUM` |
-| `status`       | String    | yes      | See status transitions below              |
-| `assignee`     | ObjectId  | no       | Ref → `users._id`, nullable               |
-| `due_date`     | Date      | no       | Must be a future date if provided         |
-| `organization` | String    | yes      | Tenant identifier (denormalized)          |
-| `createdBy`    | ObjectId  | yes      | Ref → `users._id`                         |
-| `createdAt`    | Date      | auto     |                                           |
-| `updatedAt`    | Date      | auto     |                                           |
-
-**Indexes:**
-- `{ status: 1, organization: 1 }` — list/filter tasks by status per org
-- `{ assignee: 1, organization: 1 }` — MEMBER self-scoped list + assignee filter
-- `{ due_date: 1 }` sparse — overdue/analytics queries; sparse skips null-dated documents
+Indexes: `{ email }` unique · `{ organization }`
 
 ---
 
-### Schema Relationships (ERD)
+**`tasks`**
+
+| Field | Type | Notes |
+|---|---|---|
+| `_id` | ObjectId | PK (auto) |
+| `title` | String | Required |
+| `description` | String | Defaults to `""` |
+| `priority` | Enum | `LOW` \| `MEDIUM` \| `HIGH` · default `MEDIUM` |
+| `status` | Enum | `TODO` \| `IN_PROGRESS` \| `IN_REVIEW` \| `DONE` \| `BLOCKED` |
+| `assignee` | ObjectId | FK → `users._id` · nullable |
+| `due_date` | Date | Must be a future date if provided |
+| `organization` | String | Denormalized tenant identifier |
+| `createdBy` | ObjectId | FK → `users._id` |
+| `createdAt / updatedAt` | Date | Auto |
+
+Indexes: `{ status, organization }` · `{ assignee, organization }` · `{ due_date }` sparse
+
+---
+
+### Schema diagram
 
 ```
-┌─────────────────────────────────┐
-│             users               │
-├─────────────────────────────────┤
-│ _id          ObjectId  PK       │
-│ name         String             │
-│ email        String   UNIQUE    │
-│ password     String             │
-│ role         Enum               │
-│ organization String   IDX       │
-│ refreshTokens [String]          │
-│ createdAt / updatedAt           │
-└──────────────┬──────────────────┘
-               │ 1
-               │
-        ┌──────┴──────────────────────────┐
-        │ tasks.assignee (nullable FK)    │
-        │ tasks.createdBy (FK)            │
-        └──────┬──────────────────────────┘
-               │ N
-┌──────────────▼──────────────────┐
-│              tasks              │
-├─────────────────────────────────┤
-│ _id          ObjectId  PK       │
-│ title        String             │
-│ description  String             │
-│ priority     Enum               │
-│ status       Enum               │
-│ assignee     ObjectId  FK→users │
-│ due_date     Date      IDX(sparse)│
-│ organization String   IDX       │
-│ createdBy    ObjectId  FK→users │
-│ createdAt / updatedAt           │
-└─────────────────────────────────┘
+┌──────────────────────────────────┐
+│              users               │
+├──────────────────────────────────┤
+│ _id          ObjectId   PK       │
+│ email        String     UNIQUE   │
+│ role         Enum                │
+│ organization String     IDX      │
+│ refreshTokens [String]           │
+└──────────┬───────────────────────┘
+           │ 1
+           │ tasks.createdBy  (FK)
+           │ tasks.assignee   (FK, nullable)
+           │ N
+┌──────────▼───────────────────────┐
+│              tasks               │
+├──────────────────────────────────┤
+│ _id          ObjectId   PK       │
+│ status       Enum       IDX      │
+│ assignee     ObjectId   IDX      │
+│ due_date     Date       IDX(sparse) │
+│ organization String     IDX      │
+│ createdBy    ObjectId   FK       │
+└──────────────────────────────────┘
 ```
 
 ---
 
-## Status Transition Rules
+## DB Design Decision
 
-Status is **not free-form** — only the following transitions are accepted server-side:
+**Denormalized `organization` field on tasks instead of a foreign key**
 
-```
-TODO ──→ IN_PROGRESS ──→ IN_REVIEW ──→ DONE
-  ↘            ↘              ↘
-           BLOCKED  (reachable from any active state)
+Tasks store `organization` as a plain string copied from the creating user, rather than a reference to a separate `Organization` collection.
 
-BLOCKED ──→ TODO | IN_PROGRESS
-```
+**Why:** Every task query must be tenant-scoped to prevent cross-org data leaks. Storing `organization` directly on each task document lets the compound indexes `{ status, organization }` and `{ assignee, organization }` satisfy those queries in a single index scan. MongoDB has no native join — resolving an org reference via `$lookup` on every task read would add a full extra round-trip with no benefit.
 
-- Only the **assignee** or a **MANAGER / ADMIN** may advance a task's status.
-- Attempting an invalid transition returns `400 INVALID_TRANSITION` with the allowed next states listed.
+**Tradeoff:** If an organization name changes, all task documents need a bulk write. For this use-case org names are treated as immutable identifiers after creation, so the query simplicity outweighs that risk.
+
+---
+
+## What I Would Improve Given More Time
+
+**Dedicated `Organization` collection** — currently org membership is implicit (matching string values). A proper document with explicit membership records would support invite flows, unique org name enforcement, and more formal data isolation.
+
+**Integration and unit tests** — the status transition logic and RBAC middleware are the two highest-value targets. Tests covering all transition paths and role combinations would catch regressions during refactors.
+
+**Cursor-based pagination** — the current `page + limit` offset pagination can return duplicate or skipped results under concurrent writes. Keying on `_id` or `createdAt` gives stable, consistent pages.
+
+**Rate limiting** — `express-rate-limit` on `/register` and `/login` to prevent brute-force and credential stuffing attacks.
+
+**Real-time notifications** — emit a Server-Sent Events (SSE) stream when a task's status changes, so assignees see updates without polling.
 
 ---
 
 ## Role Permissions (RBAC)
 
-RBAC is enforced at the **middleware level** (`authorize(...roles)`), never inside controller logic.
+Enforced at middleware level via `authorize(...roles)` — never inside controller logic.
 
-| Action                        | ADMIN | MANAGER | MEMBER |
-|------------------------------|:-----:|:-------:|:------:|
-| Register / Login             | ✓     | ✓       | ✓      |
-| View own profile             | ✓     | ✓       | ✓      |
-| List users in org            | ✓     | ✗       | ✗      |
-| Update user role             | ✓     | ✗       | ✗      |
-| Delete user                  | ✓     | ✗       | ✗      |
-| Create task                  | ✓     | ✓       | ✗      |
-| List tasks                   | ✓ all | ✓ all   | ✓ own  |
-| View task detail             | ✓ all | ✓ all   | ✓ own  |
-| Update task fields           | ✓     | ✓       | ✗      |
-| Update task status           | ✓     | ✓       | ✓ own* |
-| Delete task                  | ✓     | ✗       | ✗      |
-
-\* MEMBER can only change status on tasks assigned to them.
+| Action | ADMIN | MANAGER | MEMBER |
+|---|:---:|:---:|:---:|
+| Register / Login | ✓ | ✓ | ✓ |
+| View own profile | ✓ | ✓ | ✓ |
+| List / get / delete users | ✓ | ✗ | ✗ |
+| Update user role | ✓ | ✗ | ✗ |
+| Create task | ✓ | ✓ | ✗ |
+| List / view all tasks | ✓ | ✓ | own only |
+| Update task fields | ✓ | ✓ | ✗ |
+| Update task status | ✓ | ✓ | own only |
+| Delete task | ✓ | ✗ | ✗ |
 
 ---
 
-## API Endpoints
+## Status Transitions
+
+Server-side only — not free-form:
+
+```
+TODO ──→ IN_PROGRESS ──→ IN_REVIEW ──→ DONE
+  ↘           ↘              ↘
+          BLOCKED   (reachable from any active state)
+
+BLOCKED ──→ TODO | IN_PROGRESS
+```
+
+Only the **assignee** or **MANAGER / ADMIN** may advance a task's status. An invalid transition returns `400 INVALID_TRANSITION` with the list of allowed next states.
+
+---
+
+## API Reference
 
 ### Auth
-| Method | Route                      | Auth     | Description              |
-|--------|---------------------------|----------|--------------------------|
-| POST   | `/api/auth/register`       | Public   | Register a new user      |
-| POST   | `/api/auth/login`          | Public   | Login, receive tokens    |
-| POST   | `/api/auth/refresh-token`  | Public   | Rotate refresh token     |
-| POST   | `/api/auth/logout`         | Required | Revoke refresh token     |
-| GET    | `/api/auth/me`             | Required | Get current user profile |
 
-### Users (ADMIN only)
-| Method | Route                        | Description              |
-|--------|------------------------------|--------------------------|
-| GET    | `/api/users`                 | List all users in org    |
-| GET    | `/api/users/:userId`         | Get a single user        |
-| PATCH  | `/api/users/:userId/role`    | Update a user's role     |
-| DELETE | `/api/users/:userId`         | Remove user from org     |
+| Method | Route | Auth | Description |
+|---|---|---|---|
+| POST | `/api/auth/register` | Public | Register — returns access + refresh tokens |
+| POST | `/api/auth/login` | Public | Login — returns access + refresh tokens |
+| POST | `/api/auth/refresh-token` | Public | Rotate refresh token |
+| POST | `/api/auth/logout` | Required | Revoke refresh token |
+| GET | `/api/auth/me` | Required | Current user profile |
+
+### Users — ADMIN only
+
+| Method | Route | Description |
+|---|---|---|
+| GET | `/api/users` | List all users in org |
+| GET | `/api/users/:userId` | Get a single user |
+| PATCH | `/api/users/:userId/role` | Update user role |
+| DELETE | `/api/users/:userId` | Remove user from org |
 
 ### Tasks
-| Method | Route                          | Roles               | Description                    |
-|--------|-------------------------------|---------------------|--------------------------------|
-| GET    | `/api/tasks`                   | ALL                 | List tasks (paginated+filtered)|
-| POST   | `/api/tasks`                   | ADMIN, MANAGER      | Create a task                  |
-| GET    | `/api/tasks/:taskId`           | ALL                 | Get task detail                |
-| PATCH  | `/api/tasks/:taskId`           | ADMIN, MANAGER      | Update task fields             |
-| PATCH  | `/api/tasks/:taskId/status`    | ALL (scoped)        | Advance task status            |
-| DELETE | `/api/tasks/:taskId`           | ADMIN               | Delete a task                  |
 
-**List tasks query params:** `page`, `limit`, `status`, `priority`, `assignee`
+| Method | Route | Roles | Description |
+|---|---|---|---|
+| GET | `/api/tasks` | ALL | List tasks (paginated + filtered) |
+| POST | `/api/tasks` | ADMIN, MANAGER | Create task |
+| GET | `/api/tasks/:taskId` | ALL | Get task detail |
+| PATCH | `/api/tasks/:taskId` | ADMIN, MANAGER | Update task fields |
+| PATCH | `/api/tasks/:taskId/status` | ALL (scoped) | Advance task status |
+| DELETE | `/api/tasks/:taskId` | ADMIN | Delete task |
 
----
+**List query params:** `page` · `limit` · `status` · `priority` · `assignee`
 
-## Error Response Format
+### Error response shape
 
-All errors follow a consistent shape:
+Every error across every endpoint returns:
 
 ```json
 {
@@ -190,68 +248,14 @@ All errors follow a consistent shape:
 }
 ```
 
-Common codes: `VALIDATION_ERROR`, `UNAUTHORIZED`, `TOKEN_EXPIRED`, `INVALID_TOKEN`, `FORBIDDEN`, `NOT_FOUND`, `CONFLICT`, `INVALID_TRANSITION`, `INTERNAL_ERROR`
+Codes: `VALIDATION_ERROR` · `UNAUTHORIZED` · `TOKEN_EXPIRED` · `INVALID_TOKEN` · `FORBIDDEN` · `NOT_FOUND` · `CONFLICT` · `INVALID_TRANSITION` · `PAYLOAD_TOO_LARGE` · `INTERNAL_ERROR`
 
 ---
 
-## DB Design Decisions
+## Postman Collection
 
-### 1. Denormalized `organization` field on tasks (instead of a foreign key)
+Import `postman_collection.json` from the repo root into Postman.
 
-Tasks store `organization` as a plain string (same value as `user.organization`) rather than a reference to an `Organization` collection. This means:
-
-- Every query — list tasks, get task, status update — includes `organization` in the filter without a join.
-- The compound indexes `{ status, organization }` and `{ assignee, organization }` keep all tenant-scoped queries index-bound.
-- Tradeoff: if an organization is renamed, all task documents need a bulk update. For this use-case (org name is effectively immutable after creation) the query simplicity outweighs that risk.
-
-### 2. Sparse index on `due_date`
-
-Many tasks have no due date (`null`). A standard index would include all those nulls, wasting space and slowing down analytics queries that only care about dated tasks. A sparse index only indexes documents where `due_date` exists, keeping the index small and fast for overdue-task queries.
-
-### 3. Refresh token stored as array in user document (token family rotation)
-
-Rather than a separate `refresh_tokens` collection, each user document holds an array of active refresh tokens. On rotation, the old token is removed and the new one appended. If a reused (already-rotated) token is detected, the entire array is cleared — this is a standard token-family invalidation strategy that detects token theft with no extra collection needed.
-
----
-
-## Caching Strategy
-
-Redis (ioredis) caches `GET /api/tasks` results. All other endpoints go directly to MongoDB.
-
-### Cache key scheme
-
-```
-tasks:assignee:<assigneeId>:<status>:<priority>:p<page>:l<limit>
-```
-
-- For **MEMBER** requests, `assigneeId` is always `req.user._id` (their own tasks).
-- For **ADMIN/MANAGER** requests with an `assignee` filter, `assigneeId` is the filter value.
-- For **ADMIN/MANAGER** requests with no assignee filter, `assigneeId` is the sentinel `org:<orgName>`.
-
-Each key is also tracked in a Redis Set `tasks:org:<org>:__keys__` so the invalidation code knows every live key for an org without a `KEYS *` scan.
-
-**TTL:** 60 seconds (configurable via `CACHE_TTL_SECONDS` env var).
-
-### Invalidation triggers
-
-Any mutation that can change list results calls `cache.invalidate(assigneeId, org)`:
-
-| Event | Invalidates |
-|---|---|
-| Task created | Assignee's keys + full org set |
-| Task fields updated | Old assignee keys + new assignee keys + org set |
-| Task status updated | Assignee's keys + org set |
-| Task deleted | Assignee's keys + org set |
-
-Invalidation is best-effort — a Redis failure never blocks the request. The `X-Cache: HIT/MISS` response header is set on every list response for observability.
-
----
-
-## What I Would Improve Given More Time
-
-- Add a dedicated `Organization` collection and enforce org membership at registration time
-- Redis caching on task list per assignee with key-pattern invalidation
-- Docker + docker-compose so the reviewer can run `docker compose up`
-- Swagger / OpenAPI spec auto-generated from Joi schemas
-- Unit tests for status transition logic and RBAC middleware
-- Real-time status change notifications via SSE or WebSocket
+- Set the `baseUrl` variable if running on a different port (default: `http://localhost:3000`)
+- Run **Register** or **Login** first — the `accessToken`, `refreshToken`, and `userId` collection variables are auto-populated by test scripts
+- Create a task with **Create Task** — `taskId` is auto-captured for subsequent requests
