@@ -43,6 +43,11 @@ const taskSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    project: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Project',
+      default: null,
+    },
     organization: {
       type: String,
       required: true,
@@ -62,6 +67,7 @@ const taskSchema = new mongoose.Schema(
 // { due_date } sparse — analytics/overdue queries; sparse skips null-dated tasks
 taskSchema.index({ status: 1, organization: 1 });
 taskSchema.index({ assignee: 1, organization: 1 });
+taskSchema.index({ project: 1, organization: 1 }, { sparse: true });
 taskSchema.index({ due_date: 1 }, { sparse: true });
 
 const Task = mongoose.model('Task', taskSchema);

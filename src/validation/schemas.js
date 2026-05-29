@@ -80,6 +80,9 @@ const task = {
     assignee: mongoId.allow(null).default(null).messages({
       'string.pattern.base': 'assignee must be a valid MongoDB ObjectId',
     }),
+    project: mongoId.allow(null).default(null).messages({
+      'string.pattern.base': 'project must be a valid MongoDB ObjectId',
+    }),
     due_date: Joi.date().iso().greater('now').allow(null).default(null).messages({
       'date.greater': 'due_date must be a future date',
       'date.base': 'due_date must be a valid ISO date',
@@ -97,6 +100,9 @@ const task = {
     }),
     assignee: mongoId.allow(null).messages({
       'string.pattern.base': 'assignee must be a valid MongoDB ObjectId',
+    }),
+    project: mongoId.allow(null).messages({
+      'string.pattern.base': 'project must be a valid MongoDB ObjectId',
     }),
     due_date: Joi.date().iso().greater('now').allow(null).messages({
       'date.greater': 'due_date must be a future date',
@@ -143,4 +149,38 @@ const task = {
   },
 };
 
-module.exports = { auth, user, task };
+const project = {
+  create: Joi.object({
+    name: Joi.string().trim().min(1).required().messages({
+      'string.empty': 'Project name is required',
+      'any.required': 'Project name is required',
+    }),
+    description: Joi.string().trim().allow('').default(''),
+    members: Joi.array().items(mongoId).default([]).messages({
+      'string.pattern.base': 'Each member must be a valid MongoDB ObjectId',
+    }),
+  }),
+
+  update: Joi.object({
+    name: Joi.string().trim().min(1).messages({
+      'string.empty': 'Project name cannot be empty',
+    }),
+    description: Joi.string().trim().allow(''),
+    members: Joi.array().items(mongoId).messages({
+      'string.pattern.base': 'Each member must be a valid MongoDB ObjectId',
+    }),
+  }).min(1).messages({
+    'object.min': 'At least one field must be provided to update',
+  }),
+
+  params: {
+    projectId: Joi.object({
+      projectId: mongoId.required().messages({
+        'any.required': 'Project ID is required',
+        'string.pattern.base': 'projectId must be a valid MongoDB ObjectId',
+      }),
+    }),
+  },
+};
+
+module.exports = { auth, user, task, project };

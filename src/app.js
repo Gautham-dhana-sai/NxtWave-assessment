@@ -3,6 +3,7 @@ const express = require('express');
 const morgan = require('morgan');
 const authRoutes = require('./routes/auth.routes');
 const userRoutes = require('./routes/user.routes');
+const projectRoutes = require('./routes/project.routes');
 const taskRoutes = require('./routes/task.routes');
 const errorHandler = require('./middleware/errorHandler');
 
@@ -25,6 +26,7 @@ app.get('/health', (req, res) => res.json({ status: 200, data: { message: 'API i
 //   /api/tasks/*         — ADMIN | MANAGER | MEMBER (scoped by role)
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
+app.use('/api/projects', projectRoutes);
 app.use('/api/tasks', taskRoutes);
 
 // 404 handler

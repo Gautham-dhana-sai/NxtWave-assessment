@@ -108,7 +108,23 @@ Indexes: `{ email }` unique · `{ organization }`
 | `createdBy` | ObjectId | FK → `users._id` |
 | `createdAt / updatedAt` | Date | Auto |
 
-Indexes: `{ status, organization }` · `{ assignee, organization }` · `{ due_date }` sparse
+Indexes: `{ status, organization }` · `{ assignee, organization }` · `{ project, organization }` sparse · `{ due_date }` sparse
+
+---
+
+**`projects`**
+
+| Field | Type | Notes |
+|---|---|---|
+| `_id` | ObjectId | PK (auto) |
+| `name` | String | Required |
+| `description` | String | Defaults to `""` |
+| `members` | [ObjectId] | FK → `users._id` |
+| `organization` | String | Tenant identifier |
+| `createdBy` | ObjectId | FK → `users._id` |
+| `createdAt / updatedAt` | Date | Auto |
+
+Indexes: `{ organization }`
 
 ---
 
@@ -178,6 +194,9 @@ Enforced at middleware level via `authorize(...roles)` — never inside controll
 | View own profile | ✓ | ✓ | ✓ |
 | List / get / delete users | ✓ | ✗ | ✗ |
 | Update user role | ✓ | ✗ | ✗ |
+| Create / update project | ✓ | ✓ | ✗ |
+| List / view projects | ✓ | ✓ | member of only |
+| Delete project | ✓ | ✗ | ✗ |
 | Create task | ✓ | ✓ | ✗ |
 | List / view all tasks | ✓ | ✓ | own only |
 | Update task fields | ✓ | ✓ | ✗ |
@@ -222,6 +241,16 @@ Only the **assignee** or **MANAGER / ADMIN** may advance a task's status. An inv
 | GET | `/api/users/:userId` | Get a single user |
 | PATCH | `/api/users/:userId/role` | Update user role |
 | DELETE | `/api/users/:userId` | Remove user from org |
+
+### Projects
+
+| Method | Route | Roles | Description |
+|---|---|---|---|
+| GET | `/api/projects` | ALL | List projects (MEMBER sees only projects they're a member of) |
+| POST | `/api/projects` | ADMIN, MANAGER | Create project |
+| GET | `/api/projects/:projectId` | ALL | Get project detail |
+| PATCH | `/api/projects/:projectId` | ADMIN, MANAGER | Update project |
+| DELETE | `/api/projects/:projectId` | ADMIN | Delete project |
 
 ### Tasks
 

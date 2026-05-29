@@ -1,5 +1,6 @@
 const { Task, TRANSITIONS } = require('../models/Task');
 const { User } = require('../models/User');
+const { Project } = require('../models/Project');
 const { sendError, sendSuccess } = require('../utils/response');
 const cache = require('../utils/cache');
 
@@ -11,12 +12,32 @@ const resolveAssignee = async (assigneeId, org) => {
   return assigneeId;
 };
 
+// Verify project belongs to the same org
+const resolveProject = async (projectId, org) => {
+  if (!projectId) return null;
+  const project = await Project.findById(projectId).select('organization');
+  if (!project || project.organization !== org) return false;
+  return projectId;
+};
+
+const populateTask = (task) =>
+  task.populate([
+    { path: 'assignee', select: 'name email role' },
+    { path: 'createdBy', select: 'name email' },
+    { path: 'project', select: 'name' },
+  ]);
+
 const createTask = async (req, res) => {
-  const { title, description, priority, assignee, due_date } = req.body;
+  const { title, description, priority, assignee, project, due_date } = req.body;
 
   if (assignee) {
     const valid = await resolveAssignee(assignee, req.user.organization);
     if (valid === false) return sendError(res, 400, 'VALIDATION_ERROR', 'Assignee does not belong to your organization');
+  }
+
+  if (project) {
+    const valid = await resolveProject(project, req.user.organization);
+    if (valid === false) return sendError(res, 400, 'VALIDATION_ERROR', 'Project does not belong to your organization');
   }
 
   const task = await Task.create({
@@ -24,15 +45,13 @@ const createTask = async (req, res) => {
     description,
     priority,
     assignee: assignee || null,
+    project: project || null,
     due_date: due_date || null,
     organization: req.user.organization,
     createdBy: req.user._id,
   });
 
-  await task.populate([
-    { path: 'assignee', select: 'name email role' },
-    { path: 'createdBy', select: 'name email' },
-  ]);
+  await populateTask(task);
 
   // Invalidate org cache — new task affects list results for all roles
   await cache.invalidate(assignee || null, req.user.organization);
@@ -75,6 +94,7 @@ const listTasks = async (req, res) => {
     Task.find(filter)
       .populate('assignee', 'name email role')
       .populate('createdBy', 'name email')
+      .populate('project', 'name')
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit),
@@ -95,7 +115,8 @@ const listTasks = async (req, res) => {
 const getTask = async (req, res) => {
   const task = await Task.findOne({ _id: req.params.taskId, organization: req.user.organization })
     .populate('assignee', 'name email role')
-    .populate('createdBy', 'name email');
+    .populate('createdBy', 'name email')
+    .populate('project', 'name');
 
   if (!task) return sendError(res, 404, 'NOT_FOUND', 'Task not found');
 
@@ -112,7 +133,7 @@ const updateTask = async (req, res) => {
   if (!task) return sendError(res, 404, 'NOT_FOUND', 'Task not found');
 
   const previousAssignee = task.assignee ? String(task.assignee) : null;
-  const { assignee, ...rest } = req.body;
+  const { assignee, project, ...rest } = req.body;
 
   if (assignee !== undefined) {
     if (assignee === null) {
@@ -124,13 +145,20 @@ const updateTask = async (req, res) => {
     }
   }
 
+  if (project !== undefined) {
+    if (project === null) {
+      task.project = null;
+    } else {
+      const valid = await resolveProject(project, req.user.organization);
+      if (valid === false) return sendError(res, 400, 'VALIDATION_ERROR', 'Project does not belong to your organization');
+      task.project = project;
+    }
+  }
+
   Object.assign(task, rest);
   await task.save();
 
-  await task.populate([
-    { path: 'assignee', select: 'name email role' },
-    { path: 'createdBy', select: 'name email' },
-  ]);
+  await populateTask(task);
 
   // Invalidate both old and new assignee caches in case reassignment happened
   const newAssignee = task.assignee ? String(task.assignee._id) : null;
@@ -169,10 +197,7 @@ const updateTaskStatus = async (req, res) => {
   task.status = newStatus;
   await task.save();
 
-  await task.populate([
-    { path: 'assignee', select: 'name email role' },
-    { path: 'createdBy', select: 'name email' },
-  ]);
+  await populateTask(task);
 
   await cache.invalidate(task.assignee ? String(task.assignee._id) : null, req.user.organization);
 
