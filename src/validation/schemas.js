@@ -67,4 +67,78 @@ const user = {
   },
 };
 
-module.exports = { auth, user };
+const task = {
+  create: Joi.object({
+    title: Joi.string().trim().min(1).required().messages({
+      'string.empty': 'Title is required',
+      'any.required': 'Title is required',
+    }),
+    description: Joi.string().trim().allow('').default(''),
+    priority: Joi.string().valid('LOW', 'MEDIUM', 'HIGH').default('MEDIUM').messages({
+      'any.only': 'Priority must be LOW, MEDIUM, or HIGH',
+    }),
+    assignee: mongoId.allow(null).default(null).messages({
+      'string.pattern.base': 'assignee must be a valid MongoDB ObjectId',
+    }),
+    due_date: Joi.date().iso().greater('now').allow(null).default(null).messages({
+      'date.greater': 'due_date must be a future date',
+      'date.iso': 'due_date must be a valid ISO date',
+    }),
+  }),
+
+  update: Joi.object({
+    title: Joi.string().trim().min(1).messages({
+      'string.empty': 'Title cannot be empty',
+    }),
+    description: Joi.string().trim().allow(''),
+    priority: Joi.string().valid('LOW', 'MEDIUM', 'HIGH').messages({
+      'any.only': 'Priority must be LOW, MEDIUM, or HIGH',
+    }),
+    assignee: mongoId.allow(null).messages({
+      'string.pattern.base': 'assignee must be a valid MongoDB ObjectId',
+    }),
+    due_date: Joi.date().iso().greater('now').allow(null).messages({
+      'date.greater': 'due_date must be a future date',
+      'date.iso': 'due_date must be a valid ISO date',
+    }),
+  }).min(1).messages({
+    'object.min': 'At least one field must be provided to update',
+  }),
+
+  updateStatus: Joi.object({
+    status: Joi.string().valid('TODO', 'IN_PROGRESS', 'IN_REVIEW', 'DONE', 'BLOCKED').required().messages({
+      'any.only': 'Status must be TODO, IN_PROGRESS, IN_REVIEW, DONE, or BLOCKED',
+      'any.required': 'Status is required',
+    }),
+  }),
+
+  listQuery: Joi.object({
+    page: Joi.number().integer().min(1).default(1).messages({
+      'number.min': 'page must be at least 1',
+    }),
+    limit: Joi.number().integer().min(1).max(100).default(20).messages({
+      'number.min': 'limit must be at least 1',
+      'number.max': 'limit cannot exceed 100',
+    }),
+    status: Joi.string().valid('TODO', 'IN_PROGRESS', 'IN_REVIEW', 'DONE', 'BLOCKED').messages({
+      'any.only': 'status filter must be TODO, IN_PROGRESS, IN_REVIEW, DONE, or BLOCKED',
+    }),
+    priority: Joi.string().valid('LOW', 'MEDIUM', 'HIGH').messages({
+      'any.only': 'priority filter must be LOW, MEDIUM, or HIGH',
+    }),
+    assignee: mongoId.messages({
+      'string.pattern.base': 'assignee filter must be a valid MongoDB ObjectId',
+    }),
+  }),
+
+  params: {
+    taskId: Joi.object({
+      taskId: mongoId.required().messages({
+        'any.required': 'Task ID is required',
+        'string.pattern.base': 'taskId must be a valid MongoDB ObjectId',
+      }),
+    }),
+  },
+};
+
+module.exports = { auth, user, task };
